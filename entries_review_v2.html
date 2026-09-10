@@ -1563,6 +1563,7 @@ button{font-family:inherit}
 #entriesTable th .sort-icon{display:inline-flex;color:var(--lumen-color-content-neutral-subtle);flex-shrink:0}
 #entriesTable th[data-sort].is-sorted .sort-icon{color:var(--lumen-color-content-neutral-bold)}
 #entriesTable td, #entriesTable th{padding:0 14px}
+body.locale-dk #entriesTable td[data-col="date"]{font-family:'SF Mono','Roboto Mono',ui-monospace,Menlo,monospace}
 #entriesTable td.num, #entriesTable th.num{text-align:right}
 #entriesTable td.status-cell{white-space:normal;overflow:visible;height:auto;min-height:40px;padding:8px 14px;display:flex;align-items:center;gap:6px}
 #entriesTable td.supplier-cell .supplier-cell-inner{display:flex;align-items:center;gap:6px;min-width:0}
@@ -2574,9 +2575,12 @@ const DK_ACCOUNTS = [
 /* Denmark has a flat standard VAT rate ("moms") with no reduced rates; 0%
    covers exports / EU B2B reverse-charge lines. Denmark has no débits/
    encaissements (cash vs. accrual VAT) distinction, so only `immo`
-   (fixed asset) and `ue` (EU reverse charge) codes are carried over. */
+   (fixed asset) and `ue` (EU reverse charge) codes are carried over. `immo`
+   is labelled "Investeringsgode" (investment good) — the actual Danish VAT-
+   return term for capitalized purchases subject to adjustment, not a literal
+   translation of the French "Immo" suffix. */
 const DK_VAT_RATES = [0, 25];
-const DK_VAT_CODE_LABELS = { immo:'Anlæg', ue:'EU' };
+const DK_VAT_CODE_LABELS = { immo:'Investeringsgode', ue:'EU' };
 const DK_ENTRIES = [
   { id:1, number:'BR-2026-08-DK', date:'2026-08-05', supplier:'Nordic Byg ApS', label:'Renovering og indretning af kontorlokaler', account:null, exclVat:63000.00, vatPct:25, vatCode:'immo', vat:15750.00, inclVat:78750.00,
     ambiguousTreatment:true,
@@ -2631,6 +2635,29 @@ let ENTRIES, ACCOUNTS, VAT_RATES, VAT_CODE_LABELS, CURRENCIES, SUPPLIERS;
 let CURRENT_LOCALE_TAG = 'fr-FR';
 const MASTER_CURRENCIES = ['EUR','USD','DKK','GBP','CHF','SEK'];
 
+/* Order of the five reorderable data columns (account / VAT breakdown) in
+   the main entries table. Danish bookkeeping reads account → VAT rate →
+   amount, so the VAT rate moves in front of the Excl. VAT column; French/
+   English keep the Excl. VAT → VAT rate → VAT amount → Incl. VAT sequence. */
+const MAIN_TABLE_COL_ORDER = {
+  fr: ['account','exclvat','vatpct','vat','inclvat'],
+  en: ['account','exclvat','vatpct','vat','inclvat'],
+  dk: ['account','vatpct','exclvat','vat','inclvat']
+};
+let DATA_COL_ORDER = MAIN_TABLE_COL_ORDER.fr;
+
+/* Moves the <th> elements for the five reorderable columns to match
+   DATA_COL_ORDER — safe because every width/visibility rule in the CSS
+   selects by [data-col="…"], never by DOM position. */
+function reorderTableColumns(){
+  const headRow = document.querySelector('#entriesTable thead tr.default-row');
+  if(!headRow) return;
+  DATA_COL_ORDER.forEach(col => {
+    const th = headRow.querySelector(`th[data-col="${col}"]`);
+    if(th) headRow.appendChild(th);
+  });
+}
+
 /* Switches the whole app to a different country's data + locale. Every
    derived global the rest of the code reads (ENTRIES/ACCOUNTS/VAT_RATES/
    VAT_CODE_LABELS/CURRENCIES/SUPPLIERS) is reassigned wholesale from a fresh
@@ -2651,6 +2678,8 @@ function setCountry(code){
   VAT_CODE_LABELS = data.vatCodeLabels;
   CURRENCIES = MASTER_CURRENCIES.slice();
   SUPPLIERS = Array.from(new Set(ENTRIES.map(e => e.supplier))).sort((a,b)=>a.localeCompare(b));
+  DATA_COL_ORDER = MAIN_TABLE_COL_ORDER[code] || MAIN_TABLE_COL_ORDER.fr;
+  document.body.classList.toggle('locale-dk', code === 'dk');
 
   activeTab = 'to-validate';
   Object.keys(dropdownFilters).forEach(k => { dropdownFilters[k] = ''; });
@@ -2662,6 +2691,7 @@ function setCountry(code){
   closeDetail();
   applyStaticI18n();
   renderColMenu();
+  reorderTableColumns();
   redistributeColumnWidths();
   populateSupplierCountryOptions();
   populateSupplierVatRateOptions();
@@ -2768,7 +2798,15 @@ function canonicalAccount(raw){
    Formatting helpers
 --------------------------------------------------------------------- */
 function fmtMoney(n){ return n.toLocaleString(CURRENT_LOCALE_TAG, { minimumFractionDigits:2, maximumFractionDigits:2 }); }
-function fmtDate(iso){ return new Date(iso + 'T00:00:00').toLocaleDateString(CURRENT_LOCALE_TAG); }
+/* Danish table dates use zero-padded dd.mm.yyyy in a monospace face (PM
+   feedback), not the browser's da-DK default of unpadded d.m.yyyy. */
+function fmtDate(iso){
+  if(currentCountry === 'dk'){
+    const [y, m, d] = iso.split('-');
+    return `${d}.${m}.${y}`;
+  }
+  return new Date(iso + 'T00:00:00').toLocaleDateString(CURRENT_LOCALE_TAG);
+}
 function sumLines(entry, field){ return entry.lines ? entry.lines.reduce((s,l)=>s+l[field],0) : (entry[field] ?? 0); }
 function sortValue(entry, key){
   switch(key){
@@ -2830,16 +2868,19 @@ function buildEntryRows(e, zebraClass){
     html += `<td data-col="date">${fmtDate(e.date)}</td>`;
     html += supplierCell;
     html += `<td data-col="label">${e.label ?? ''}</td>`;
-    html += `<td data-col="account">${e.account ?? '<span class="dash">—</span>'}</td>`;
-    html += `<td class="num" data-col="exclvat">${e.exclVat != null ? fmtMoney(e.exclVat) : '<span class="dash">—</span>'}</td>`;
     /* Batirenov (ambiguous Charge/Immobilisation treatment): the VAT rate's
        "Immo" suffix reflects which treatment was chosen, so the overview
        shouldn't reveal a rate at all until the entry is actually validated —
        showing it earlier would look like a settled answer before it is one. */
     const showVatPct = e.vatPct != null && !(e.ambiguousTreatment && e.status !== 'validated');
-    html += `<td class="num" data-col="vatpct">${showVatPct ? formatVatLabel(e.vatPct, e.vatCode) : '<span class="dash">—</span>'}</td>`;
-    html += `<td class="num vat-cell" data-col="vat">${e.vat != null ? fmtMoney(e.vat) : '<span class="dash">—</span>'}</td>`;
-    html += `<td class="num incl-cell" data-col="inclvat">${fmtMoney(e.inclVat)}</td>`;
+    const cells = {
+      account: `<td data-col="account">${canonicalAccount(e.account) ?? '<span class="dash">—</span>'}</td>`,
+      exclvat: `<td class="num" data-col="exclvat">${e.exclVat != null ? fmtMoney(e.exclVat) : '<span class="dash">—</span>'}</td>`,
+      vatpct: `<td class="num" data-col="vatpct">${showVatPct ? formatVatLabel(e.vatPct, e.vatCode) : '<span class="dash">—</span>'}</td>`,
+      vat: `<td class="num vat-cell" data-col="vat">${e.vat != null ? fmtMoney(e.vat) : '<span class="dash">—</span>'}</td>`,
+      inclvat: `<td class="num incl-cell" data-col="inclvat">${fmtMoney(e.inclVat)}</td>`
+    };
+    html += DATA_COL_ORDER.map(col => cells[col]).join('');
     html += `</tr>`;
     return html;
   }
@@ -2849,8 +2890,17 @@ function buildEntryRows(e, zebraClass){
   html += statusCellHtml(e);
   html += `<td data-col="date">${fmtDate(e.date)}</td>`;
   html += supplierCell;
-  html += `<td data-col="label"></td><td data-col="account"></td><td class="num" data-col="exclvat"></td><td class="num" data-col="vatpct"></td><td class="num vat-cell" data-col="vat"></td>`;
-  html += `<td class="num incl-cell" data-col="inclvat">${fmtMoney(e.inclVat)}</td>`;
+  html += `<td data-col="label"></td>`;
+  {
+    const parentCells = {
+      account: `<td data-col="account"></td>`,
+      exclvat: `<td class="num" data-col="exclvat"></td>`,
+      vatpct: `<td class="num" data-col="vatpct"></td>`,
+      vat: `<td class="num vat-cell" data-col="vat"></td>`,
+      inclvat: `<td class="num incl-cell" data-col="inclvat">${fmtMoney(e.inclVat)}</td>`
+    };
+    html += DATA_COL_ORDER.map(col => parentCells[col]).join('');
+  }
   html += `</tr>`;
 
   e.lines.forEach(line => {
@@ -2860,11 +2910,14 @@ function buildEntryRows(e, zebraClass){
     html += `<td data-col="date"></td>`;
     html += `<td data-col="supplier" class="supplier-cell"></td>`;
     html += `<td data-col="label">${line.label ?? ''}</td>`;
-    html += `<td data-col="account">${line.account ?? '<span class="dash">—</span>'}</td>`;
-    html += `<td class="num" data-col="exclvat">${fmtMoney(line.excl)}</td>`;
-    html += `<td class="num" data-col="vatpct">${formatVatLabel(line.vatPct, line.vatCode)}</td>`;
-    html += `<td class="num vat-cell" data-col="vat">${line.vat != null ? fmtMoney(line.vat) : '<span class="dash">—</span>'}</td>`;
-    html += `<td class="num incl-cell" data-col="inclvat">${fmtMoney(line.incl)}</td>`;
+    const lineCells = {
+      account: `<td data-col="account">${canonicalAccount(line.account) ?? '<span class="dash">—</span>'}</td>`,
+      exclvat: `<td class="num" data-col="exclvat">${fmtMoney(line.excl)}</td>`,
+      vatpct: `<td class="num" data-col="vatpct">${formatVatLabel(line.vatPct, line.vatCode)}</td>`,
+      vat: `<td class="num vat-cell" data-col="vat">${line.vat != null ? fmtMoney(line.vat) : '<span class="dash">—</span>'}</td>`,
+      inclvat: `<td class="num incl-cell" data-col="inclvat">${fmtMoney(line.incl)}</td>`
+    };
+    html += DATA_COL_ORDER.map(col => lineCells[col]).join('');
     html += `</tr>`;
   });
   return html;
