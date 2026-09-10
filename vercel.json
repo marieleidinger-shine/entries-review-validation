@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/", "destination": "/entries_review_v2.html" }
+  ]
+}
